@@ -276,7 +276,7 @@ class HyVideoModelLoader:
                 "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
 
             "base_precision": (["fp32", "bf16"], {"default": "bf16"}),
-            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_scaled', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
+            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_scaled', 'fp8_scaled_fast', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
             "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
             },
             "optional": {
@@ -300,6 +300,36 @@ class HyVideoModelLoader:
     FUNCTION = "loadmodel"
     CATEGORY = "HunyuanVideoWrapper"
 
+    def convert_comfy_model(self, comfy_sd):
+        new_sd = {}
+        for key, value in comfy_sd.items():
+            new_key = key
+            # Remove the "model.model." prefix
+            if new_key.startswith("model.model."):
+                new_key = new_key[len("model.model."):]
+            # Replace ending .scale with .weight (leave .weight and .bias unchanged)
+            if new_key.endswith(".scale"):
+                new_key = new_key[:-len(".scale")] + ".weight"
+            new_key = new_key.replace("attn.norm.key_norm", "attn_k_norm")
+            new_key = new_key.replace("attn.norm.query_norm", "attn_q_norm")
+            new_key = new_key.replace("norm.key_norm", "k_norm")
+            new_key = new_key.replace("norm.query_norm", "q_norm")
+            new_key = new_key.replace("attn.norm.query_norm", "attn_q_norm")
+            new_key = new_key.replace("attn.proj", "attn_proj")
+            new_key = new_key.replace("attn.qkv", "attn_qkv")
+            new_key = new_key.replace("mlp.0", "mlp.fc1")
+            new_key = new_key.replace("mlp.2", "mlp.fc2")
+            new_key = new_key.replace("mod.lin", "mod.linear")
+            new_key = new_key.replace("txt_in.c_embedder.in_layer", "txt_in.c_embedder.linear_1")
+            new_key = new_key.replace("txt_in.c_embedder.out_layer", "txt_in.c_embedder.linear_2")
+            if "vector_in" not in key:
+                new_key = new_key.replace("in_layer", "mlp.0")
+                new_key = new_key.replace("out_layer", "mlp.2")
+            new_key = new_key.replace("modulation.lin", "modulation.linear")
+            new_sd[new_key] = value
+
+        return new_sd
+
     def loadmodel(self, model, base_precision, load_device,  quantization,
                   compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, auto_cpu_offload=False, upcast_rope=True):
         transformer = None
@@ -316,12 +346,17 @@ class HyVideoModelLoader:
         offload_device = mm.unet_offload_device()
         manual_offloading = True
         transformer_load_device = device if load_device == "main_device" else offload_device
-        
-        base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[base_precision]
+
+        base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "fp8_scaled": torch.bfloat16, "fp8_scaled_fast": torch.bfloat16, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[base_precision]
 
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
+        if "model.model.double_blocks.0.img_attn.norm.key_norm.scale" in sd:
+            log.info("Loading Comfy format Hunyuan state dict...")
+            sd = self.convert_comfy_model(sd)
+        else:
+            log.info("Loading Kijai format Hunyuan state dict...")
         in_channels = sd["img_in.proj.weight"].shape[1]
         if in_channels == 16 and "i2v" in model.lower():
             i2v_condition_type = "token_replace"
@@ -382,7 +417,7 @@ class HyVideoModelLoader:
 
         if not "torchao" in quantization:
             log.info("Using accelerate to load and assign model weights to device...")
-            if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast" or quantization == "fp8_scaled":
+            if quantization == "fp8_e4m3fn" or quantization == "fp8_e4m3fn_fast":
                 dtype = torch.float8_e4m3fn
             elif quantization == "fp8_e5m2":
                 dtype = torch.float8_e5m2
@@ -440,10 +475,15 @@ class HyVideoModelLoader:
             if quantization == "fp8_e4m3fn_fast":
                 from .fp8_optimization import convert_fp8_linear
                 convert_fp8_linear(patcher.model.diffusion_model, base_dtype, params_to_keep=params_to_keep)
-            elif quantization == "fp8_scaled":
-                from .hyvideo.modules.fp8_optimization import convert_fp8_linear
-                convert_fp8_linear(patcher.model.diffusion_model, base_dtype)
-
+            elif "fp8_scaled" in quantization:
+                #from .hyvideo.modules.fp8_optimization import convert_fp8_linear
+                #convert_fp8_linear(patcher.model.diffusion_model, base_dtype)
+                from .fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+                state_dict = patcher.model.diffusion_model.state_dict()
+                state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["blocks"], exclude_layer_keys=params_to_keep)
+                apply_fp8_monkey_patch(patcher.model.diffusion_model, state_dict, quantization == "fp8_scaled_fast")  # It's modified in place so no need to assign
+                patcher.model.diffusion_model.load_state_dict(state_dict, strict=True, assign=True)
+                dtype = torch.float8_e4m3fn
             if auto_cpu_offload:
                 transformer.enable_auto_offload(dtype=dtype, device=device)
 
