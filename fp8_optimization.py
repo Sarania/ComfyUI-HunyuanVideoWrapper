@@ -283,7 +283,8 @@ def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False):
     Returns:
         nn.Module: The patched model (same instance, modified in-place)
     """
-    setattr(model, "fp8_matmul_enabled", True)
+    if use_scaled_mm:
+        setattr(model, "fp8_matmul_enabled", True)
     # # Calculate FP8 float8_e5m2 max value
     # max_value = calculate_fp8_maxval(5, 2)
     max_value = None  # do not quantize input tensor
