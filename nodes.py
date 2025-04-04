@@ -1319,6 +1319,26 @@ class HyVideoContextOptions:
         }
 
         return (context_options,)
+
+class HyVideoLoopArgs:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+                "shift_skip": ("INT", {"default": 6, "min": 0, "tooltip": "Skip step of latent shift"}),
+                "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Start percent of the looping effect"}),
+                "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "End percent of the looping effect"}),
+            },
+        }
+
+    RETURN_TYPES = ("LOOPARGS", )
+    RETURN_NAMES = ("loop_args",)
+    FUNCTION = "process"
+    CATEGORY = "HunyuanVideoWrapper"
+    DESCRIPTION = "Looping through latent shift as shown in https://github.com/YisuiTT/Mobius/"
+
+    def process(self, **kwargs):
+        return (kwargs,)
+    
 #region Sampler
 class HyVideoSampler:
     @classmethod
@@ -1351,6 +1371,7 @@ class HyVideoSampler:
                     }),
                 "riflex_freq_index": ("INT", {"default": 0, "min": 0, "max": 1000, "step": 1, "tooltip": "Frequency index for RIFLEX, disabled when 0, default 4. Allows for new frames to be generated after 129 without looping"}),
                 "i2v_mode": (["stability", "dynamic"], {"default": "dynamic", "tooltip": "I2V mode for image2video process"}),
+                "loop_args": ("LOOPARGS", ),
             }
         }
 
@@ -1361,7 +1382,7 @@ class HyVideoSampler:
 
     def process(self, model, hyvid_embeds, flow_shift, steps, embedded_guidance_scale, seed, width, height, num_frames, 
                 samples=None, denoise_strength=1.0, force_offload=True, stg_args=None, context_options=None, feta_args=None, 
-                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability"):
+                teacache_args=None, scheduler=None, image_cond_latents=None, riflex_freq_index=0, i2v_mode="stability", loop_args=None):
         model = model.model
 
         device = mm.get_torch_device()
@@ -1515,6 +1536,7 @@ class HyVideoSampler:
             image_cond_latents = image_cond_latents["samples"] * VAE_SCALING_FACTOR if image_cond_latents is not None else None,
             riflex_freq_index = riflex_freq_index,
             i2v_stability = i2v_stability,
+            loop_args = loop_args,
         )
 
         print_memory(device)
@@ -1932,6 +1954,7 @@ NODE_CLASS_MAPPINGS = {
     "HyVideoI2VEncode": HyVideoI2VEncode,
     "HyVideoEncodeKeyframes": HyVideoEncodeKeyframes,
     "HyVideoTextEmbedBridge": HyVideoTextEmbedBridge,
+    "HyVideoLoopArgs": HyVideoLoopArgs,
     }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoSampler": "HunyuanVideo Sampler",
@@ -1959,4 +1982,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HyVideoI2VEncode": "HyVideo I2V Encode",
     "HyVideoEncodeKeyframes": "HyVideo Encode Keyframes",
     "HyVideoTextEmbedBridge": "HyVideo TextEmbed Bridge",
+    "HyVideoLoopArgs": "HyVideo Loop Args",
     }
