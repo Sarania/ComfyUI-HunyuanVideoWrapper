@@ -275,8 +275,8 @@ class HyVideoModelLoader:
             "required": {
                 "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
 
-            "base_precision": (["fp32", "bf16"], {"default": "bf16"}),
-            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_scaled', 'fp8_scaled_fast', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
+            "base_precision": (["fp32", "bf16", "fp16", "fp16_fast"], {"default": "bf16"}),
+            "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_e4m3fn_scaled', 'fp8_e4m3fn_scaled_fast', 'fp8_e5m2_scaled', 'fp8_e5m2_scaled_fast', 'torchao_fp8dq', "torchao_fp8dqrow", "torchao_int8dq", "torchao_fp6", "torchao_int4", "torchao_int8"], {"default": 'disabled', "tooltip": "optional quantization method"}),
             "load_device": (["main_device", "offload_device"], {"default": "main_device"}),
             },
             "optional": {
@@ -347,8 +347,19 @@ class HyVideoModelLoader:
         manual_offloading = True
         transformer_load_device = device if load_device == "main_device" else offload_device
 
-        base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "fp8_scaled": torch.bfloat16, "fp8_scaled_fast": torch.bfloat16, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[base_precision]
-
+        base_dtype = {"fp8_e4m3fn": torch.float8_e4m3fn, "fp8_e4m3fn_fast": torch.float8_e4m3fn, "fp8_e4m3fn_scaled": torch.bfloat16, "fp8_e4m3fn_scaled_fast": torch.bfloat16, "fp8_e5m2_scaled": torch.bfloat16, "fp8_e5m2_scaled_fast": torch.bfloat16, "bf16": torch.bfloat16, "fp16": torch.float16, "fp16_fast": torch.float16, "fp32": torch.float32}[base_precision]
+        
+        if base_precision == "fp16_fast":
+            if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+                torch.backends.cuda.matmul.allow_fp16_accumulation = True
+            else:
+                raise ValueError("torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch, requires torch 2.7.0.dev2025 02 26 nightly minimum currently")
+        else:
+            try:
+                if hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+                    torch.backends.cuda.matmul.allow_fp16_accumulation = False
+            except:
+                pass
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
 
@@ -475,15 +486,17 @@ class HyVideoModelLoader:
             if quantization == "fp8_e4m3fn_fast":
                 from .fp8_optimization import convert_fp8_linear
                 convert_fp8_linear(patcher.model.diffusion_model, base_dtype, params_to_keep=params_to_keep)
-            elif "fp8_scaled" in quantization:
-                #from .hyvideo.modules.fp8_optimization import convert_fp8_linear
-                #convert_fp8_linear(patcher.model.diffusion_model, base_dtype)
+            elif "scaled" in quantization:
+                exp_bits = 4
+                mantissa_bits = 3
+                if "e5m2" in quantization:
+                    exp_bits = 5
+                    mantissa_bits = 2
                 from .fp8_optimization import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
                 state_dict = patcher.model.diffusion_model.state_dict()
-                state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["blocks"], exclude_layer_keys=params_to_keep)
-                apply_fp8_monkey_patch(patcher.model.diffusion_model, state_dict, quantization == "fp8_scaled_fast")  # It's modified in place so no need to assign
+                state_dict = optimize_state_dict_with_fp8(state_dict, device, target_layer_keys=["blocks"], exclude_layer_keys=params_to_keep, exp_bits=exp_bits, mantissa_bits=mantissa_bits)
+                apply_fp8_monkey_patch(patcher.model.diffusion_model, state_dict, "fast" in quantization)  # It's modified in place so no need to assign
                 patcher.model.diffusion_model.load_state_dict(state_dict, strict=True, assign=True)
-                dtype = torch.float8_e4m3fn
             if auto_cpu_offload:
                 transformer.enable_auto_offload(dtype=dtype, device=device)
 
